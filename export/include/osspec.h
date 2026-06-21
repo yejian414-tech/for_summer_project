@@ -1,1 +1,1 @@
-/home/ubu/test/torcs-1.3.7/src/linux/osspec.h
+/home/caojj/temp/for_summer_project/src/linux/osspec.h

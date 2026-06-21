@@ -1,1 +1,1 @@
-/home/ubu/test/torcs-1.3.7/src/libs/confscreens/driverconfig.h
+/home/caojj/temp/for_summer_project/src/libs/confscreens/driverconfig.h

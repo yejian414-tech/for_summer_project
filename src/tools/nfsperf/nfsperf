@@ -18,7 +18,7 @@
 #
 ##############################################################################
 
-prefix=/usr/local
+prefix=/home/caojj/temp/for_summer_project/BUILD
 exec_prefix=${prefix}
 
 BINDIR=${exec_prefix}/bin
