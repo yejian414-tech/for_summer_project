@@ -141,24 +141,23 @@ static void csvName(FILE *f, const char *name)
 
 /* ── 排名写入 ─────────────────────────────────────────────── */
 
-static void writeRankings(LogState *s, const tSituation *sit)
-{
-    if (!s->rankingFile)
-        return;
+static void writeRankings(LogState *s,const tSituation *sit){
+    if(!s->rankingFile)return;
+    for(int i=0;i<sit->_ncars;++i){
+        const tCarElt *c=sit->cars[i];if(!c)continue;
+        fprintf(s->rankingFile,"%.6f,%d,",sit->currentTime,i);
+        csvName(s->rankingFile,c->_name);
+        fprintf(s->rankingFile,",%d,%d,%.6f\n",c->race.pos,c->_laps,c->race.distFromStartLine);
 
-    for (int i = 0; i < sit->_ncars; ++i) {
-        const tCarElt *c = sit->cars[i];
-        if (!c)
-            continue;
-
-        fprintf(s->rankingFile, "%.6f,%d,", sit->currentTime, i);
-        csvName(s->rankingFile, c->_name);
-        fprintf(s->rankingFile, ",%d,%d,%.6f\n",
-                c->race.pos, c->_laps, c->race.distFromStartLine);
+        // 新增：构造 UDP 包并发送
+        char rbuf[512];
+        int rlen=snprintf(rbuf,sizeof(rbuf),"R,%.6f,%d,%s,%d,%d,%.6f\n",
+            sit->currentTime,i,c->_name?c->_name:"",
+            c->race.pos,c->_laps,c->race.distFromStartLine);
+        if(rlen>0&&s->socketOpen)
+            sendto(s->socket,rbuf,rlen,0,(const sockaddr*)&s->peer,sizeof(s->peer));
     }
-
-    if ((s->seq % 20) == 0)
-        fflush(s->rankingFile);
+    if((s->seq%20)==0)fflush(s->rankingFile);
 }
 
 /* ── 公开接口 ─────────────────────────────────────────────── */
@@ -308,22 +307,9 @@ void PlayerLoggerSample(int p, const tCarElt *car, const tSituation *sit)
     if (len <= 0 || (size_t)len + 1 >= sizeof(buf))
         return;
     buf[len++] = '\n';
+    buf[len]   = 0;
 
-    /* 追加排名数据到同一包 */
-    for (int i = 0; i < sit->_ncars; ++i) {
-        const tCarElt *c = sit->cars[i];
-        if (!c)
-            continue;
-        int n = snprintf(buf + len, sizeof(buf) - len, "R,%.6f,%d,%s,%d,%d,%.6f\n",
-                         sit->currentTime, i,
-                         c->_name ? c->_name : "",
-                         c->race.pos, c->_laps, c->race.distFromStartLine);
-        if (n > 0 && (size_t)(len + n) < sizeof(buf))
-            len += n;
-    }
-    buf[len] = 0;
-
-    /* 写文件 + UDP 一次发送 */
+    /* 写文件 + UDP 发送 */
     if (s->file) {
         fwrite(buf, 1, len, s->file);
         if ((s->seq % 20) == 0)
