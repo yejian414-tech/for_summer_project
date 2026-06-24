@@ -242,12 +242,13 @@ export TORCS_PLAYER_UDP_PORT=3101
 
 ## Granite AI Features
 
-This project now includes two Granite-powered middleware scripts on top of the existing AI engineer flow:
+This project now includes three Granite-powered middleware scripts:
 
+- `chat_engineer.py` / `chat_engineer_gui.py` (+ `car_state_source.py`, `prompt_builder.py`, `granite_client.py`) for Feature 1: AI racing engineer chatbot (CLI and desktop GUI entrypoints)
 - `telemetry_analyzer.py` for Feature 2: telemetry analysis and driving guidance
 - `race_commentator.py` for Feature 3: procedural race commentary
 
-Both features follow the same architecture:
+All three features follow the same architecture:
 
 ```text
 TORCS UDP CSV -> Python middleware -> Granite endpoint -> text output
@@ -296,123 +297,68 @@ python3 lmstudio_smoke_test.py
 
 You can still override the endpoint per feature with the feature-specific environment variables shown below.
 
-### Feature 2: Telemetry Analysis and Guidance
+### Feature 1: AI Racing Engineer Chatbot
 
-Run:
+This is Module 1 from the project brief, split between two teammates per the team's 分工文档:
 
-```bash
-python3 telemetry_analyzer.py
-```
+- "A 同学" owns **赛车数据采集与状态分析功能**: reading TORCS data and turning it into a `car_state` dict with a `problems` list.
+- "B 同学" owns **AI 赛车工程师问答功能**: turning that `car_state` plus a player question into a Granite-generated answer. The files below (`car_state_source.py`, `prompt_builder.py`, `granite_client.py`, `chat_engineer.py`) are B's deliverable.
 
-Optional environment variables:
-
-```bash
-export TORCS_ANALYZER_BASE_URL="http://<model-host>:<port>/v1"
-export TORCS_ANALYZER_MODEL="granite"
-export TORCS_ANALYZER_INTERVAL=3.0
-export TORCS_ANALYZER_WINDOW_SECONDS=6.0
-export TORCS_ANALYZER_RETENTION_SECONDS=180
-export TORCS_ANALYZER_TTS=false
-```
-
-What the middleware does:
-
-1. Reads TORCS telemetry rows from UDP `3101`.
-2. Parses each row into structured fields such as speed, throttle, brake, RPM, track position, track sensors, and opponent sensors.
-3. Builds a rolling time window and computes summary metrics:
-   average speed, throttle usage, braking events, steering stability, track-position pressure, nearest opponent, and damage trend.
-4. Uses a local rule fast-path for urgent cases such as traffic danger, off-track risk, and critical pit windows.
-5. Sends a compact structured telemetry payload to Granite through an asynchronous worker so telemetry collection is not blocked by model latency.
-6. Drops stale model responses and suppresses repeated advice.
-7. Receives a structured response with:
-   analysis, focus area, one concrete action, and pit-stop advice.
-
-Student reproduction steps:
-
-1. Build and launch TORCS as described above.
-2. Start the Granite-compatible model endpoint.
-3. Optionally run `python3 lmstudio_smoke_test.py` to confirm the local model returns text.
-4. Export the telemetry environment variables.
-5. Run `python3 telemetry_analyzer.py`.
-6. Start driving with the human driver in TORCS.
-7. Observe:
-   live coaching feedback every few seconds and a lap review whenever a full lap is completed.
-
-Feature 2 payload shape:
+Agreed `car_state` contract between A and B:
 
 ```json
 {
-  "task": "telemetry_coaching",
-  "analysis_type": "live_window",
-  "latest_state": {},
-  "window_summary": {},
-  "sensors": {}
+  "speed": 210.0,
+  "rpm": 8700.0,
+  "gear": 5,
+  "track_pos": 0.72,
+  "damage": 1200.0,
+  "fuel": 35.0,
+  "lap_time": 102.3,
+  "problems": ["车辆快要偏离赛道", "转速过高，建议升挡"]
 }
 ```
 
-### Feature 3: Procedural Commentary
-
-Run:
+Run (CLI version, runs in a terminal):
 
 ```bash
-python3 race_commentator.py
+python3 chat_engineer.py
 ```
 
-Optional environment variables:
+Run (desktop GUI version, recommended for demos -- a floating chat window with a live status panel instead of a terminal):
 
 ```bash
-export TORCS_COMMENTATOR_BASE_URL="http://<model-host>:<port>/v1"
-export TORCS_COMMENTATOR_MODEL="granite"
-export TORCS_COMMENTATOR_INTERVAL=5.0
-export TORCS_COMMENTATOR_WINDOW_SECONDS=8.0
-export TORCS_COMMENTATOR_EVENT_COOLDOWN=2.5
-export TORCS_COMMENTATOR_TTS=false
+python3 chat_engineer_gui.py
 ```
 
-What the middleware does:
+`chat_engineer_gui.py` is a Tkinter window with three parts: a live status panel (speed/rpm/gear/track position/damage/fuel/lap time + detected problems, refreshed every `TORCS_ENGINEER_REFRESH_MS` ms), a scrollable chat log, and an input box (Enter or the 发送 button to send). It reuses `car_state_source.py`, `prompt_builder.py`, and `granite_client.py` unchanged -- only the input/output layer differs from the CLI version, and Granite calls run on a background thread so the window never freezes while waiting for a reply. Keep the CLI version around as a quick debug entrypoint (no GUI dependencies, easier to read raw errors).
 
-1. Reads the same TORCS telemetry feed from UDP `3101`.
-2. Detects race events before calling Granite.
-3. Assigns event priority so important moments replace low-value updates.
-4. Builds a compact race-event payload and sends it through an asynchronous worker.
-5. Drops stale commentary and suppresses repeated lines.
-6. Asks Granite to generate one short piece of live commentary.
+Optional environment variables (shared by both entrypoints, plus one GUI-only var):
 
-Currently detected events:
+```bash
+export TORCS_ENGINEER_BASE_URL="http://<model-host>:<port>/v1"
+export TORCS_ENGINEER_MODEL="granite"
+export TORCS_ENGINEER_USE_FAKE_DATA=true   # force demo car_state data
+export TORCS_ENGINEER_UDP_PORT=3101        # live telemetry UDP port
+export TORCS_ENGINEER_HISTORY_TURNS=3      # how many past Q&A turns to keep as context
+export TORCS_ENGINEER_REFRESH_MS=500       # GUI only: status panel refresh interval (ms)
+```
 
-- Lap completion
-- Position change
-- Contact or damage spike
-- Off-track moment
-- Close battle with another car
-- Strong acceleration surge
-- Baseline pace update when no major event occurs
+What the chatbot does:
+
+1. Tries to read live `car_state` data from the same TORCS UDP telemetry feed (port `3101`) used by Feature 2/3, via `LiveCarStateSource` in `car_state_source.py`. This is a temporary bridge standing in for A's `race_analyzer.py` output, so B can build and demo the chatbot before that handoff lands.
+2. Falls back to `FakeCarStateSource` (a few hand-written demo scenarios) if no live telemetry shows up within 5 seconds, or if `TORCS_ENGINEER_USE_FAKE_DATA=true` is set.
+3. Prints the current car state and prompts for a player question on the command line.
+4. `prompt_builder.py` formats the car state and question into a Chinese system+user prompt for Granite.
+5. `granite_client.py` sends the prompt to the Granite-compatible endpoint and returns the answer.
+6. Keeps a short rolling history of the last few Q&A turns so follow-up questions ("那我下一圈呢？") have context.
 
 Student reproduction steps:
 
-1. Reuse the shared telemetry export setup.
-2. Start the Granite-compatible model endpoint.
-3. Optionally run `python3 lmstudio_smoke_test.py "Give me one sentence to prove you are connected."`.
-4. Run `python3 race_commentator.py`.
-5. Launch TORCS and drive.
-6. Watch the terminal for short commentary lines whenever events are detected.
+1. Optionally start TORCS with the human driver telemetry export enabled (see Shared Setup above), or just set `TORCS_ENGINEER_USE_FAKE_DATA=true` to test without TORCS running at all.
+2. Start the Granite-compatible model endpoint (e.g. LM Studio with a Granite model loaded).
+3. Run `python3 chat_engineer.py`.
+4. Ask questions like "我的轮胎状态怎么样？" / "现在该不该进站？" / "为什么我刚才过弯慢？".
+5. Type `exit` to quit.
 
-Feature 3 payload shape:
-
-```json
-{
-  "task": "race_commentary",
-  "event_type": "battle",
-  "event_reason": "Nearest opponent is 8.2 meters away",
-  "current_state": {},
-  "window_summary": {},
-  "style": {}
-}
-```
-
-### Added Middleware Files
-
-- `telemetry_common.py`: shared telemetry parsing, buffering, summarization, async worker utilities, and TTS helpers
-- `telemetry_analyzer.py`: Feature 2 implementation
-- `race_commentator.py`: Feature 3 implementation
-- `lmstudio_smoke_test.py`: quick local LM Studio connection test
+Swapping in A's real data: once A delivers a module that produces a dict mat
