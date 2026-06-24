@@ -84,3 +84,4 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+src/libs/txml/gennmtab/
