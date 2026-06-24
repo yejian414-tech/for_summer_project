@@ -447,10 +447,29 @@
     <div class="section-title" onclick="toggleSection(this)">自动解说</div>
     <div class="section-body">
       <div>
+        <label>模式</label>
+        <select id="commentary-mode">
+          <option value="off">关闭</option>
+          <option value="interval">固定间隔</option>
+          <option value="event">事件驱动</option>
+          <option value="hybrid">事件 + 间隔</option>
+        </select>
+      </div>
+      <div>
         <label>解说间隔 (秒，0=关闭): <span id="auto-interval-val">0</span></label>
         <div class="slider-wrap">
           <input type="range" min="0" max="60" step="1" value="0" id="auto-interval"
             oninput="document.getElementById('auto-interval-val').textContent=this.value">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>事件窗口 (秒)</label>
+          <input type="number" min="2" max="30" step="1" id="event-window" value="6">
+        </div>
+        <div>
+          <label>事件冷却 (秒)</label>
+          <input type="number" min="0" max="10" step="0.5" id="event-cooldown" value="1">
         </div>
       </div>
       <button class="btn-primary" onclick="saveAutoInterval()">应用</button>
@@ -573,6 +592,10 @@ function handleWsMessage(msg) {
 
     case 'telemetry_update':
       updateTelemetryBar(msg.telemetry);
+      break;
+
+    case 'event_detected':
+      sysMsg(`事件：${msg.event.event_type} — ${msg.event.reason}`);
       break;
 
     case 'user_msg':
@@ -739,13 +762,19 @@ async function saveContextConfig() {
 
 async function saveAutoInterval() {
   const v = parseInt(document.getElementById('auto-interval').value);
-  await fetch('/api/config/auto_interval', {
+  const mode = document.getElementById('commentary-mode').value;
+  await fetch('/api/commentary/config', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ interval: v }),
+    body: JSON.stringify({
+      mode: v <= 0 ? 'off' : mode,
+      baseline_interval: v,
+      window_seconds: parseFloat(document.getElementById('event-window').value),
+      event_cooldown: parseFloat(document.getElementById('event-cooldown').value),
+    }),
   });
   const ind = document.getElementById('auto-indicator');
-  if (v > 0) {
-    ind.textContent = `自动解说：每 ${v} 秒`;
+  if (v > 0 && mode !== 'off') {
+    ind.textContent = `自动解说：${mode} / ${v} 秒`;
     ind.classList.add('active');
   } else {
     ind.textContent = '自动解说：未启动';
@@ -782,8 +811,13 @@ async function loadConfig() {
 
     document.getElementById('auto-interval').value = cfg.auto_interval;
     document.getElementById('auto-interval-val').textContent = cfg.auto_interval;
-    if (cfg.auto_interval > 0) {
-      document.getElementById('auto-indicator').textContent = `自动解说：每 ${cfg.auto_interval} 秒`;
+    if (cfg.commentary) {
+      document.getElementById('commentary-mode').value = cfg.commentary.mode;
+      document.getElementById('event-window').value = cfg.commentary.window_seconds;
+      document.getElementById('event-cooldown').value = cfg.commentary.event_cooldown;
+    }
+    if (cfg.auto_interval > 0 && (!cfg.commentary || cfg.commentary.mode !== 'off')) {
+      document.getElementById('auto-indicator').textContent = `自动解说：${cfg.commentary?.mode || 'interval'} / ${cfg.auto_interval} 秒`;
       document.getElementById('auto-indicator').classList.add('active');
     }
   } catch(e) { console.warn('loadConfig 失败', e); }

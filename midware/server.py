@@ -14,12 +14,8 @@ TORCS 比赛解说中间件 — 主服务
 
 import asyncio
 import csv
-import io
 import json
 import logging
-import socket
-import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +25,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from commentary_engine import CommentaryConfig, CommentaryEngine
 from context_manager import ContextConfig, ContextManager
+from telemetry import TelemetryStore, start_udp_listener
 
 # ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -56,16 +54,23 @@ api_config: dict[str, Any] = {
 ctx_cfg   = ContextConfig()
 ctx_mgr   = ContextManager(ctx_cfg)
 
-# -- 最新遥测数据（UDP 线程写入，主线程读） --
-latest_telemetry: dict | None = None
-latest_rankings:  list | None = None
-telemetry_lock    = threading.Lock()
+# -- 遥测数据缓存（UDP 线程写入，主线程读） --
+telemetry_store = TelemetryStore(window_seconds=30.0)
 
 # -- WebSocket 客户端集合 --
 ws_clients: set[WebSocket] = set()
 
-# -- 自动解说定时器 --
-auto_commentary_interval: float = 10.0   # 秒，0 = 关闭
+# -- 自动解说配置 --
+commentary_engine = CommentaryEngine(
+    CommentaryConfig(
+        mode="interval",
+        baseline_interval=10.0,
+        event_cooldown=1.0,
+        window_seconds=6.0,
+        dedupe_seconds=10.0,
+        max_words=45,
+    )
+)
 _auto_task: asyncio.Task | None = None
 
 # ---------------------------------------------------------------------------
@@ -74,70 +79,6 @@ _auto_task: asyncio.Task | None = None
 
 app = FastAPI(title="TORCS 比赛解说中间件")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-# ---------------------------------------------------------------------------
-# CSV 字段名解析（human 模块输出的主 CSV，无表头的 UDP 行需要预设顺序）
-# ---------------------------------------------------------------------------
-
-# UDP 推送内容与 CSV 数据行相同，但不含表头；字段顺序见 README
-MAIN_CSV_FIELDS = [
-    "seq","sim_time","player","lap","x","y","yaw",
-    "accel_x","accel_y","steer","throttle","brake","clutch",
-    "angle","curLapTime","damage","distFromStart","distRaced",
-    "fuel","gear","lastLapTime","racePos","rpm",
-    "speedX","speedY","speedZ","trackPos","z",
-    *[f"opponent_{i}" for i in range(36)],
-    *[f"track_{i}" for i in range(19)],
-    *[f"wheelSpinVel_{i}" for i in range(4)],
-    *[f"focus_{i}" for i in range(5)],
-]
-
-RANK_CSV_FIELDS = ["sim_time","car_index","car_name","race_pos","laps","dist_from_start"]
-
-
-def parse_udp_telemetry(data: bytes) -> dict:
-    """把 UDP 字节（CSV 数据行，无表头）解析成字典。"""
-    try:
-        text = data.decode("utf-8", errors="replace").strip()
-        reader = csv.reader(io.StringIO(text))
-        row = next(reader)
-        result = {}
-        for i, field in enumerate(MAIN_CSV_FIELDS):
-            if i < len(row):
-                try:
-                    result[field] = float(row[i])
-                except ValueError:
-                    result[field] = row[i]
-        return result
-    except Exception as e:
-        log.warning(f"UDP 解析失败: {e}")
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# UDP 监听线程
-# ---------------------------------------------------------------------------
-
-def udp_listener_thread(host: str = "0.0.0.0", port: int = 3101):
-    """后台线程：持续监听 TORCS human 模块的 UDP 推送。"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((host, port))
-    sock.settimeout(1.0)
-    log.info(f"UDP 监听器启动 {host}:{port}")
-
-    while True:
-        try:
-            data, _ = sock.recvfrom(8192)
-            parsed = parse_udp_telemetry(data)
-            if parsed:
-                with telemetry_lock:
-                    global latest_telemetry
-                    latest_telemetry = parsed
-        except socket.timeout:
-            continue
-        except Exception as e:
-            log.error(f"UDP 监听器错误: {e}")
-            time.sleep(0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +195,8 @@ async def generate_commentary(
     telemetry: dict | None = None,
     rankings: list | None = None,
     manual_prompt: str | None = None,
+    event_payload: dict | None = None,
+    history_mode: str = "full",
 ) -> str:
     """
     构建上下文 → 调用 AI → 存入历史 → 广播。
@@ -262,15 +205,21 @@ async def generate_commentary(
         raise ValueError("API Key 未设置")
 
     # 1. 构造 user message
-    if manual_prompt:
+    if event_payload:
+        user_content = ctx_mgr.format_event_prompt(event_payload)
+        history_content = ctx_mgr.format_event_history_entry(event_payload)
+    elif manual_prompt:
         user_content = manual_prompt
+        history_content = user_content
     elif telemetry:
         user_content = ctx_mgr.format_telemetry(telemetry, rankings)
+        history_content = user_content
     else:
         raise ValueError("没有遥测数据或手动 prompt")
 
     # 2. 加入历史
-    ctx_mgr.add_user(user_content)
+    if history_mode != "assistant_only":
+        ctx_mgr.add_user(history_content)
 
     # 3. 广播 user 消息（用于 UI 显示）
     await broadcast({
@@ -309,20 +258,32 @@ async def generate_commentary(
 
 async def _auto_commentary_loop():
     while True:
-        interval = auto_commentary_interval
-        if interval <= 0:
+        cfg = commentary_engine.config
+        if cfg.mode == "off":
             await asyncio.sleep(1)
             continue
-        await asyncio.sleep(interval)
 
-        with telemetry_lock:
-            t = dict(latest_telemetry) if latest_telemetry else None
-            r = list(latest_rankings)  if latest_rankings  else None
+        await asyncio.sleep(0.5 if cfg.mode in ("event", "hybrid") else max(1.0, cfg.baseline_interval))
 
+        t, r = telemetry_store.latest()
         if t is None:
             continue
+
         try:
-            await generate_commentary(t, r)
+            frames = telemetry_store.recent_frames(cfg.window_seconds)
+            decision = commentary_engine.next_decision(frames, r)
+            if decision is None:
+                continue
+
+            await broadcast({"type": "event_detected", "event": decision.event, "payload": decision.payload})
+            reply = await generate_commentary(
+                t,
+                r,
+                event_payload=decision.payload,
+                history_mode="summary",
+            )
+            if not commentary_engine.should_emit_text(reply, float(decision.payload.get("event_time", 0.0))):
+                log.info("重复解说已被去重记录标记")
         except Exception as e:
             log.warning(f"自动解说失败: {e}")
 
@@ -352,7 +313,15 @@ async def get_config():
             "included_fields":     ctx_cfg.included_fields,
             "include_rankings":    ctx_cfg.include_rankings,
         },
-        "auto_interval": auto_commentary_interval,
+        "auto_interval": commentary_engine.config.baseline_interval if commentary_engine.config.mode != "off" else 0,
+        "commentary": {
+            "mode": commentary_engine.config.mode,
+            "baseline_interval": commentary_engine.config.baseline_interval,
+            "event_cooldown": commentary_engine.config.event_cooldown,
+            "window_seconds": commentary_engine.config.window_seconds,
+            "dedupe_seconds": commentary_engine.config.dedupe_seconds,
+            "max_words": commentary_engine.config.max_words,
+        },
     }
 
 
@@ -378,17 +347,34 @@ async def update_context_config(body: dict):
 
 @app.post("/api/config/auto_interval")
 async def update_auto_interval(body: dict):
-    global auto_commentary_interval
-    auto_commentary_interval = float(body.get("interval", 0))
-    return {"ok": True, "interval": auto_commentary_interval}
+    interval = float(body.get("interval", 0))
+    commentary_engine.config.baseline_interval = interval
+    commentary_engine.config.mode = "interval" if interval > 0 else "off"
+    return {"ok": True, "interval": interval, "mode": commentary_engine.config.mode}
+
+
+@app.get("/api/commentary/config")
+async def get_commentary_config():
+    return {
+        "mode": commentary_engine.config.mode,
+        "baseline_interval": commentary_engine.config.baseline_interval,
+        "event_cooldown": commentary_engine.config.event_cooldown,
+        "window_seconds": commentary_engine.config.window_seconds,
+        "dedupe_seconds": commentary_engine.config.dedupe_seconds,
+        "max_words": commentary_engine.config.max_words,
+    }
+
+
+@app.post("/api/commentary/config")
+async def update_commentary_config(body: dict):
+    commentary_engine.update_config(body)
+    return {"ok": True, "config": await get_commentary_config()}
 
 
 @app.post("/api/commentary/manual")
 async def manual_commentary(body: dict):
     """手动触发一次解说（可附带自定义 prompt）。"""
-    with telemetry_lock:
-        t = dict(latest_telemetry) if latest_telemetry else None
-        r = list(latest_rankings)  if latest_rankings  else None
+    t, r = telemetry_store.latest()
 
     prompt = body.get("prompt") or None
     asyncio.create_task(generate_commentary(t, r, manual_prompt=prompt))
@@ -403,22 +389,28 @@ async def clear_history():
 
 @app.get("/api/telemetry")
 async def get_telemetry():
-    with telemetry_lock:
-        return {
-            "telemetry": latest_telemetry,
-            "rankings":  latest_rankings,
-        }
+    telemetry, rankings = telemetry_store.latest()
+    return {"telemetry": telemetry, "rankings": rankings}
+
+
+@app.get("/api/telemetry/history")
+async def get_telemetry_history(seconds: float | None = None):
+    return {"frames": telemetry_store.recent_frames(seconds), "rankings": telemetry_store.recent_rankings(seconds)}
 
 
 @app.post("/api/telemetry/push")
 async def push_telemetry(body: dict):
     """手动 POST 遥测数据（测试用）。"""
-    global latest_telemetry, latest_rankings
-    with telemetry_lock:
-        latest_telemetry = body.get("telemetry", {})
-        latest_rankings  = body.get("rankings", [])
-    await broadcast({"type": "telemetry_update", "telemetry": latest_telemetry})
+    telemetry = body.get("telemetry", {})
+    rankings = body.get("rankings", [])
+    telemetry_store.push(telemetry, rankings)
+    await broadcast({"type": "telemetry_update", "telemetry": telemetry, "rankings": rankings})
     return {"ok": True}
+
+
+@app.get("/api/events/recent")
+async def get_recent_events():
+    return {"events": commentary_engine.recent_events}
 
 
 @app.post("/api/csv/load")
@@ -460,10 +452,7 @@ async def load_csv(body: dict):
                 latest_t = max(float(x.get("sim_time",0)) for x in r)
                 r = [x for x in r if abs(float(x.get("sim_time",0)) - latest_t) < 0.01]
 
-    global latest_telemetry, latest_rankings
-    with telemetry_lock:
-        latest_telemetry = t
-        latest_rankings  = r or None
+    telemetry_store.push(t, r or None)
 
     asyncio.create_task(generate_commentary(t, r or None))
     return {"ok": True, "rows_loaded": len(rows), "latest_sim_time": t.get("sim_time")}
@@ -495,7 +484,7 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_json({
             "type": "connected",
             "stats": ctx_mgr.stats(),
-            "has_telemetry": latest_telemetry is not None,
+            "has_telemetry": telemetry_store.has_telemetry(),
         })
         while True:
             # 保持连接，接收 ping
@@ -514,8 +503,12 @@ async def websocket_endpoint(ws: WebSocket):
 @app.on_event("startup")
 async def startup():
     # 启动 UDP 监听线程
-    t = threading.Thread(target=udp_listener_thread, daemon=True)
-    t.start()
+    start_udp_listener(
+        telemetry_store,
+        port=3101,
+        on_error=lambda exc: log.error(f"UDP 监听器错误: {exc}"),
+    )
+    log.info("UDP 监听器启动 0.0.0.0:3101")
 
     # 启动自动解说循环
     global _auto_task

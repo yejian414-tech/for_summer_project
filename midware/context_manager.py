@@ -7,6 +7,7 @@ SillyTavern 的核心思路：
   3. 格式化时按选定的 Chat Template（ChatML / Instruct / Raw）拼装
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -52,9 +53,10 @@ class ContextConfig:
 
     # ---- 解说员人设（对应 ST 的 "Character Card / System Prompt"）----
     commentator_persona: str = (
-        "你是一位专业的赛车比赛解说员，风格热情、专业、带有临场感。"
-        "根据提供的实时遥测数据，用流畅的中文给出简短（2-4句）的精彩解说。"
-        "重点关注：速度变化、位次争夺、驾驶动作、危险情况。"
+        "你是一位专业的中文赛车比赛解说员，风格热情、专业、紧凑、有临场感。"
+        "根据提供的 TORCS 实时遥测数据和比赛事件，用流畅中文给出简短（1-3句）的精彩解说。"
+        "优先描述具体事件，重点关注速度变化、位次争夺、驾驶动作、危险情况。"
+        "不要编造遥测数据中没有的信息，避免重复上一条解说。"
     )
 
     # ---- 数据字段过滤（选择哪些 TORCS 字段进入 prompt）----
@@ -204,6 +206,28 @@ class ContextManager:
 
         lines.append("\n请根据以上数据给出精彩解说：")
         return "\n".join(lines)
+
+    def format_event_prompt(self, payload: dict) -> str:
+        """
+        把事件检测引擎生成的结构化 payload 转成 user message。
+        """
+        payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        return (
+            "请根据以下结构化比赛事件生成中文解说。\n"
+            "要求：1-3句，紧扣事件，语言有临场感，不要输出列表或 JSON。\n\n"
+            f"{payload_text}"
+        )
+
+    def format_event_history_entry(self, payload: dict) -> str:
+        event_type = payload.get("event_type", "unknown")
+        reason = payload.get("event_reason", "")
+        event_time = payload.get("event_time", "?")
+        state = payload.get("current_state", {})
+        return (
+            f"事件摘要: {event_type} @ {event_time}s; {reason}; "
+            f"P{state.get('race_pos', '?')}, lap {state.get('lap', '?')}, "
+            f"speed {state.get('speed_x', '?')} km/h."
+        )
 
     # ------------------------------------------------------------------
     # 统计
