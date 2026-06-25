@@ -430,21 +430,28 @@ class _DriveParams:
     max_speed:    float  # km/h absolute ceiling
     accel_limit:  float  # maximum accel command [0, 1]
     brake_gain:   float  # multiplier when speed exceeds target
-    steer_gain:   float  # angle * steer_gain → steer component
-                         # angle is in radians (~[-0.5, 0.5] during normal driving)
-                         # keep near 1.0 — do NOT multiply by 10 or divide by π
-    center_gain:  float  # track_pos correction (pull back to centre)
+    steer_gain:   float  # angle * steer_gain → "align with track" steer term.
+                         # angle is in radians (~[-0.5, 0.5] during normal driving).
+                         # Higher = sharper corner turn-in but more twitchy.
+    center_gain:  float  # track_pos * center_gain → "return to centre" steer term.
+                         # Keep small (~0.1-0.3): tpos is [-1, 1], so a large gain
+                         # fights the alignment term and causes weaving.
     speed_factor: float  # corner_speed_kmh = sqrt(min_fwd_m * speed_factor)
 
 
 #                          max_spd  accel  brake_g  steer_g  cntr_g  spd_factor
 _PARAMS: dict[str, _DriveParams] = {
-    ATTACK:    _DriveParams(300,    1.00,   1.20,    1.1,     0.4,   220),
-    NORMAL:    _DriveParams(250,    0.95,   1.00,    1.0,     0.5,   180),
-    DEFEND:    _DriveParams(180,    0.80,   0.90,    1.0,     0.6,   130),
-    SAVE_FUEL: _DriveParams(150,    0.65,   0.80,    1.0,     0.5,    80),
-    PIT:       _DriveParams( 50,    0.30,   1.50,    0.8,     0.8,    10),
+    ATTACK:    _DriveParams(300,    1.00,   1.20,    0.90,    0.20,  220),
+    NORMAL:    _DriveParams(250,    0.95,   1.00,    0.85,    0.20,  180),
+    DEFEND:    _DriveParams(180,    0.80,   0.90,    0.80,    0.25,  130),
+    SAVE_FUEL: _DriveParams(150,    0.65,   0.80,    0.80,    0.20,   80),
+    PIT:       _DriveParams( 50,    0.30,   1.50,    0.70,    0.30,   10),
 }
+
+# Lateral-velocity damping: counter-steers against sideways slide to kill the
+# snaking/weaving oscillation.  steer -= speed_y * _STEER_DAMP.
+# speed_y is m/s; ~3 m/s of slide → ~0.18 of counter-steer at 0.06.
+_STEER_DAMP = 0.06
 
 
 def compute_control(state: dict[str, Any], strategy: str = NORMAL) -> str:
@@ -456,6 +463,7 @@ def compute_control(state: dict[str, Any], strategy: str = NORMAL) -> str:
     params     = _PARAMS.get(strategy, _PARAMS[NORMAL])
 
     speed      = state.get("speed_x",      0.0)
+    speed_y    = state.get("speed_y",      0.0)
     gear       = state.get("gear",           0)
     angle      = state.get("angle",        0.0)
     tpos       = state.get("track_pos",    0.0)
@@ -477,12 +485,18 @@ def compute_control(state: dict[str, Any], strategy: str = NORMAL) -> str:
     # --- gear (speed-based, from snakeoil.py) ---
     gear = _gear_from_speed(gear, speed)
 
-    # --- lookahead steering ---
-    # angle > 0 = car faces RIGHT -> will drift right -> tpos falls
-    # future_tpos = tpos - angle*L/halfwidth
-    _L     = 17.0 + 0.33 * speed / 3.6
-    _ftpos = tpos - angle * _L / 5.0
-    steer  = clamp(-_ftpos * params.center_gain, -1.0, 1.0)
+    # --- steering: damped proportional control ---
+    #   align term   : steer toward the track axis  (angle, radians)
+    #   centre term  : pull back toward the centre line  (tpos, [-1, 1])
+    #   damping term : counter the sideways slide  (speed_y, m/s) → kills snaking
+    # A single, speed-independent gain set avoids the over-correction that the
+    # old speed-scaled lookahead produced at high speed.
+    steer = (
+        angle * params.steer_gain
+        - tpos * params.center_gain
+        - speed_y * _STEER_DAMP
+    )
+    steer = clamp(steer, -1.0, 1.0)
 
     # --- corner speed limit: tight forward window (±5°, indices 8–10) ---
     # Using ±20° caused unnecessary braking when corner walls read short.
