@@ -14,7 +14,7 @@ TORCS UDP :3101
      检测事件、设置优先级、冷却和去重，生成结构化 payload
   -> context_manager.py
      管理解说员人设、历史上下文和 token 预算
-  -> server.py + static/index.html
+  -> commentary.py + static/index.html / static/index2.html
      FastAPI 服务、REST API、WebSocket 流式输出和网页配置界面
 ```
 
@@ -43,13 +43,14 @@ TORCS UDP :3101
 
 ```text
 midware/
-├── server.py              # FastAPI 主服务，REST/WebSocket/调度
+├── commentary.py          # FastAPI 主服务，REST/WebSocket/调度
 ├── telemetry.py           # UDP 解析、车辆帧缓存、排名缓存
 ├── commentary_engine.py   # 事件检测、冷却、去重、payload 构造
 ├── context_manager.py     # 解说员 prompt、历史上下文、token 裁剪
 ├── requirements.txt       # Python 依赖
 └── static/
-    └── index.html         # Web UI
+    ├── index.html         # 文字解说 Web UI
+    └── index2.html        # 语音解说 Web UI
 ```
 
 ## 一、编译 TORCS
@@ -184,7 +185,7 @@ Base URL: http://172.24.160.1:1234/v1
 API Key: lm-studio
 ```
 
-说明：LM Studio 通常不校验 API Key，但当前 `server.py` 对 OpenAI-compatible provider 要求 API Key 非空，所以填 `lm-studio` 即可。
+说明：LM Studio 通常不校验 API Key，但当前 `commentary.py` 对 OpenAI-compatible provider 要求 API Key 非空，所以填 `lm-studio` 即可。
 
 ## 三、部署并启动 midware
 
@@ -202,7 +203,13 @@ pip install -r requirements.txt
 ```bash
 cd ~/test/torcs-1.3.7/midware
 source .venv/bin/activate
-python server.py
+python commentary.py
+```
+
+默认加载文字解说界面 `static/index.html`。如果要查看语音解说界面 `static/index2.html`，使用：
+
+```bash
+python commentary.py --ui voice
 ```
 
 服务启动后访问：
@@ -218,7 +225,7 @@ Python 语法检查：
 ```bash
 cd ~/test/torcs-1.3.7
 python3 -m py_compile \
-  midware/server.py \
+  midware/commentary.py \
   midware/context_manager.py \
   midware/telemetry.py \
   midware/commentary_engine.py
@@ -309,7 +316,7 @@ TORCS_PLAYER_UDP_HOST=127.0.0.1
 TORCS_PLAYER_UDP_PORT=3101
 ```
 
-表示发到本机的 `3101` 端口。`midware/server.py` 正在监听这个端口。
+表示发到本机的 `3101` 端口。`midware/commentary.py` 正在监听这个端口。
 
 完整链路：
 
