@@ -2,6 +2,12 @@
 
 `midware` 是 TORCS 的实时 AI 比赛解说服务。它接收 TORCS human 数据采集器发出的 UDP 遥测，缓存最近一段比赛状态，检测关键比赛事件，然后调用 OpenAI-compatible API（例如 LM Studio）生成解说，并通过 WebSocket 流式推送到网页端和 Electron 桌面字幕悬浮窗。
 
+项目的标准 AI 显示链路是 `midware WebSocket -> overlay-app`。后续新增的 AI 功能如果需要面向用户显示或朗读内容，应复用 `ai_start` / `token` / `ai_done` / `error` 消息协议，不应单独创建新的字幕 UI。完整协议见：
+
+```text
+../docs/display-layer-contract.md
+```
+
 ## 功能概览
 
 当前解说功能由四部分组成：

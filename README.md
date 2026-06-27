@@ -269,6 +269,12 @@ TORCS human 数据采集器
 
 `midware` 负责接收 TORCS 遥测、检测比赛事件、调用模型、提供 REST 配置 API 和 WebSocket 解说流。`overlay-app` 是独立 Electron 应用：主窗口显示透明、无边框、始终置顶的游戏 HUD 风格字幕面板，并通过小设置按钮或应用菜单打开独立设置窗口。
 
+所有面向用户展示或朗读的 AI 输出都应复用这条链路，不要为单个 AI 功能单独创建字幕窗口、网页工具栏、Tkinter 窗口或终端-only 展示路径。显示层协议见：
+
+```text
+docs/display-layer-contract.md
+```
+
 ### 1. 启动模型服务
 
 如果使用 LM Studio：
