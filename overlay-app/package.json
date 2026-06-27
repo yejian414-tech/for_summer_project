@@ -1,0 +1,13 @@
+{
+  "name": "torcs-ai-overlay",
+  "version": "1.0.0",
+  "description": "TORCS AI Overlay desktop caption HUD",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.7.7"
+  }
+}

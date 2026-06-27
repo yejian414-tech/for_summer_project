@@ -8,7 +8,7 @@
 midware/telemetry.py
 midware/commentary_engine.py
 midware/context_manager.py
-midware/server.py
+midware/commentary.py
 ```
 
 ## 当前状态
@@ -30,7 +30,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 /health
 ```
 
-但当前项目的解说 UI、自动解说、LM Studio 调用和 TORCS UDP 接入均已合并到 `midware/` 中。
+但当前项目的解说 UI、自动解说、LM Studio 调用、TORCS UDP 接入和 WebSocket 推送均已合并到 `midware/` 中。桌面字幕悬浮窗位于 `overlay-app/`，它连接 `midware/commentary.py` 暴露的 `ws://127.0.0.1:8765/ws`。
 
 ## 建议
 

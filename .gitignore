@@ -41,6 +41,7 @@
 src/tools/package/specfiles/*.spec
 
 # Runtime-generated files
+/logs/
 /player_logs/
 *.log
 *.pid
@@ -85,3 +86,12 @@ __pycache__/
 .venv/
 venv/
 src/libs/txml/gennmtab/
+
+# Node / Electron helpers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+overlay-app/dist/
+overlay-app/out/
